@@ -14,7 +14,6 @@
 #define ECHO_PIN PB2
 #define SOFT_TX_PIN PD3
 #define SOFT_RX_PIN PD2
-
 #define START_BYTE 0xFF
 #define DISTANCE_CMD 0x01
 #define END_BYTE 0xFE
@@ -24,7 +23,11 @@ volatile uint32_t timer1_overflow_count = 0;
 void init_system(void);
 void init_hardware_uart(void);
 void init_timer1(void);
+void init_gpio(void);
 void uart_transmit(uint8_t data);
+void uart_print_string(const char* str);
+void uart_print_number(uint16_t number);
+void debug_print_distance(uint16_t distance);
 void soft_uart_transmit(uint8_t data);
 void send_uart_packet(uint16_t distance);
 uint32_t get_microseconds(void);
@@ -32,18 +35,13 @@ uint16_t read_hc_sr04(void);
 
 int main(void) {
     init_system();
-    const char* startup_msg = "Arduino #1 Ready - Sending to Arduino #2\r\n";
-    for (int i = 0; startup_msg[i] != '\0'; i++) uart_transmit(startup_msg[i]);
+    
+    uart_print_string("Arduino #1 Ready - Sending to Arduino #2\r\n");
+    
     while (1) {
         uint16_t distance = read_hc_sr04();
         if (distance > 0 && distance < 400) {
-            const char* msg = "Sending: ";
-            for (int i = 0; msg[i] != '\0'; i++) uart_transmit(msg[i]);
-            char dist_str[10];
-            itoa(distance, dist_str, 10);
-            for (int i = 0; dist_str[i] != '\0'; i++) uart_transmit(dist_str[i]);
-            const char* unit = " cm\r\n";
-            for (int i = 0; unit[i] != '\0'; i++) uart_transmit(unit[i]);
+            debug_print_distance(distance);
             send_uart_packet(distance);
         }
         _delay_ms(1000);
@@ -54,13 +52,17 @@ void init_system(void) {
     cli();
     init_hardware_uart();
     init_timer1();
+    init_gpio();
+    sei();
+}
+
+void init_gpio(void) {
     DDRB |= (1 << TRIG_PIN);
     DDRB &= ~(1 << ECHO_PIN);
     DDRD |= (1 << SOFT_TX_PIN);
     DDRD &= ~(1 << SOFT_RX_PIN);
     PORTB &= ~(1 << TRIG_PIN);
     PORTD |= (1 << SOFT_TX_PIN);
-    sei();
 }
 
 void init_hardware_uart(void) {
@@ -69,6 +71,29 @@ void init_hardware_uart(void) {
     UBRR0L = (uint8_t)baud_setting;
     UCSR0B = (1 << TXEN0) | (1 << RXEN0);
     UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);
+}
+
+void uart_transmit(uint8_t data) {
+    while (!(UCSR0A & (1 << UDRE0)));
+    UDR0 = data;
+}
+
+void uart_print_string(const char* str) {
+    for (int i = 0; str[i] != '\0'; i++) {
+        uart_transmit(str[i]);
+    }
+}
+
+void uart_print_number(uint16_t number) {
+    char num_str[10];
+    itoa(number, num_str, 10);
+    uart_print_string(num_str);
+}
+
+void debug_print_distance(uint16_t distance) {
+    uart_print_string("Sending: ");
+    uart_print_number(distance);
+    uart_print_string(" cm\r\n");
 }
 
 void init_timer1(void) {
@@ -82,29 +107,6 @@ ISR(TIMER1_OVF_vect) {
     timer1_overflow_count++;
 }
 
-void uart_transmit(uint8_t data) {
-    while (!(UCSR0A & (1 << UDRE0)));
-    UDR0 = data;
-}
-
-void soft_uart_transmit(uint8_t data) {
-    OCR1A = TCNT1 + 208;
-    PORTD &= ~(1 << SOFT_TX_PIN);
-    while (!(TIFR1 & (1 << OCF1A)));
-    TIFR1 |= (1 << OCF1A);
-    for (uint8_t i = 0; i < 8; i++) {
-        OCR1A += 208;
-        if (data & (1 << i)) PORTD |= (1 << SOFT_TX_PIN);
-        else PORTD &= ~(1 << SOFT_TX_PIN);
-        while (!(TIFR1 & (1 << OCF1A)));
-        TIFR1 |= (1 << OCF1A);
-    }
-    OCR1A += 208;
-    PORTD |= (1 << SOFT_TX_PIN);
-    while (!(TIFR1 & (1 << OCF1A)));
-    TIFR1 |= (1 << OCF1A);
-}
-
 uint32_t get_microseconds(void) {
     uint32_t m;
     uint16_t t;
@@ -115,32 +117,65 @@ uint32_t get_microseconds(void) {
     return ((m * 65536) + t) / 2;
 }
 
+void soft_uart_transmit(uint8_t data) {
+    OCR1A = TCNT1 + 208;
+    
+    PORTD &= ~(1 << SOFT_TX_PIN);
+    while (!(TIFR1 & (1 << OCF1A)));
+    TIFR1 |= (1 << OCF1A);
+    
+    for (uint8_t i = 0; i < 8; i++) {
+        OCR1A += 208;
+        if (data & (1 << i)) 
+            PORTD |= (1 << SOFT_TX_PIN);
+        else 
+            PORTD &= ~(1 << SOFT_TX_PIN);
+        
+        while (!(TIFR1 & (1 << OCF1A)));
+        TIFR1 |= (1 << OCF1A);
+    }
+    
+    OCR1A += 208;
+    PORTD |= (1 << SOFT_TX_PIN);
+    while (!(TIFR1 & (1 << OCF1A)));
+    TIFR1 |= (1 << OCF1A);
+}
+
 uint16_t read_hc_sr04(void) {
     uint32_t start_time, pulse_duration;
+    
     PORTB &= ~(1 << TRIG_PIN);
     _delay_us(2);
     PORTB |= (1 << TRIG_PIN);
     _delay_us(10);
     PORTB &= ~(1 << TRIG_PIN);
+    
     uint32_t timeout = get_microseconds() + 30000;
-    while (!(PINB & (1 << ECHO_PIN))) if (get_microseconds() > timeout) return 0;
+    while (!(PINB & (1 << ECHO_PIN))) {
+        if (get_microseconds() > timeout) return 0;
+    }
+    
     start_time = get_microseconds();
     timeout = start_time + 30000;
-    while (PINB & (1 << ECHO_PIN)) if (get_microseconds() > timeout) return 0;
+    while (PINB & (1 << ECHO_PIN)) {
+        if (get_microseconds() > timeout) return 0;
+    }
+    
     pulse_duration = get_microseconds() - start_time;
+    
     return (pulse_duration * 343) / (2 * 10000);
 }
 
 void send_uart_packet(uint16_t distance) {
     uint8_t high_byte = (distance >> 8) & 0xFF;
     uint8_t low_byte = distance & 0xFF;
+    
     soft_uart_transmit(START_BYTE);
     soft_uart_transmit(DISTANCE_CMD);
     soft_uart_transmit(high_byte);
     soft_uart_transmit(low_byte);
     soft_uart_transmit(END_BYTE);
 }
-
 
 //2nd arduino
 
