@@ -190,15 +190,41 @@ void send_uart_packet(uint16_t distance) {
 #define START_BYTE 0xFF
 #define DISTANCE_CMD 0x01
 #define END_BYTE 0xFE
-
 #define RXBUF_SIZE 64
+
 volatile uint8_t rxbuf[RXBUF_SIZE];
 volatile uint8_t rx_head = 0;
 volatile uint8_t rx_tail = 0;
-
 volatile uint8_t rx_active = 0;
 volatile uint8_t rx_bit = 0;
 volatile uint8_t rx_byte = 0;
+
+void uart_init(void);
+void uart_tx(uint8_t c);
+void uart_print(const char* s);
+void uart_print_distance(uint16_t distance);
+void led_init(void);
+void led_toggle(void);
+void softuart_rx_init(void);
+uint8_t packet_get_byte(void);
+uint8_t packet_available(void);
+void process_distance_packet(void);
+static inline void rb_push(uint8_t b);
+
+int main(void){
+    uart_init();
+    led_init();
+    softuart_rx_init();
+    sei();
+    
+    uart_print("Arduino #2 Ready");
+    
+    for(;;){
+        if(packet_available()){
+            process_distance_packet();
+        }
+    }
+}
 
 void uart_init(void){
     uint16_t b = (F_CPU/(16UL*9600))-1;
@@ -207,13 +233,32 @@ void uart_init(void){
     UCSR0B = (1<<TXEN0);
     UCSR0C = (1<<UCSZ01)|(1<<UCSZ00);
 }
+
 void uart_tx(uint8_t c){
     while(!(UCSR0A & (1<<UDRE0)));
     UDR0 = c;
 }
+
 void uart_print(const char* s){
     while(*s) uart_tx(*s++);
     uart_tx('\r'); uart_tx('\n');
+}
+
+void uart_print_distance(uint16_t distance){
+    char s[16];
+    itoa(distance, s, 10);
+    uart_tx('D'); uart_tx(':'); uart_tx(' ');
+    for(char* p=s; *p; ++p) uart_tx(*p);
+    uart_tx(' '); uart_tx('c'); uart_tx('m'); uart_tx('\r'); uart_tx('\n');
+}
+
+void led_init(void){
+    DDRB |= (1<<LED_PIN);
+    PORTB &= ~(1<<LED_PIN);
+}
+
+void led_toggle(void){
+    PORTB ^= (1<<LED_PIN);
 }
 
 static inline void rb_push(uint8_t b){
@@ -254,44 +299,36 @@ ISR(TIMER1_COMPA_vect){
     }
 }
 
-int main(void){
-    uart_init();
-    DDRB |= (1<<LED_PIN);
-    PORTB &= ~(1<<LED_PIN);
-    softuart_rx_init();
-    sei();
-
-    uint8_t state = 0;
-    uint8_t cmd = 0;
-    uint8_t hb = 0, lb = 0;
-
-    uart_print("Arduino #2 Ready");
-
-    for(;;){
-        if(rx_head != rx_tail){
-            uint8_t b = rxbuf[rx_tail];
-            rx_tail = (rx_tail+1) & (RXBUF_SIZE-1);
-
-            switch(state){
-                case 0: if(b==START_BYTE){ state=1; } break;
-                case 1: cmd=b; state=2; break;
-                case 2: hb=b; state=3; break;
-                case 3: lb=b; state=4; break;
-                case 4:
-                    if(b==END_BYTE && cmd==DISTANCE_CMD){
-                        uint16_t dist = ((uint16_t)hb<<8)|lb;
-                        char s[16];
-                        itoa(dist, s, 10);
-                        uart_tx('D'); uart_tx(':'); uart_tx(' ');
-                        for(char* p=s; *p; ++p) uart_tx(*p);
-                        uart_tx(' '); uart_tx('c'); uart_tx('m'); uart_tx('\r'); uart_tx('\n');
-                        PORTB ^= (1<<LED_PIN);
-                    }
-                    state=0;
-                    break;
-                default: state=0; break;
-            }
-        }
-    }
+uint8_t packet_available(void){
+    return (rx_head != rx_tail);
 }
 
+uint8_t packet_get_byte(void){
+    uint8_t b = rxbuf[rx_tail];
+    rx_tail = (rx_tail+1) & (RXBUF_SIZE-1);
+    return b;
+}
+
+void process_distance_packet(void){
+    static uint8_t state = 0;
+    static uint8_t cmd = 0;
+    static uint8_t hb = 0, lb = 0;
+    
+    uint8_t b = packet_get_byte();
+    
+    switch(state){
+        case 0: if(b==START_BYTE){ state=1; } break;
+        case 1: cmd=b; state=2; break;
+        case 2: hb=b; state=3; break;
+        case 3: lb=b; state=4; break;
+        case 4:
+            if(b==END_BYTE && cmd==DISTANCE_CMD){
+                uint16_t dist = ((uint16_t)hb<<8)|lb;
+                uart_print_distance(dist);
+                led_toggle();
+            }
+            state=0;
+            break;
+        default: state=0; break;
+    }
+}
